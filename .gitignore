@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+*.p8
+*.pem
+config.json
+secrets.json
+state.json
+pending.json
+*.log
+alert.json
