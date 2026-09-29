@@ -34,8 +34,8 @@ Duet has no third-party dependencies. It uses the Python standard library and th
 ### 1. Get the code
 
 ```bash
-git clone https://github.com/OWNER/REPO.git
-cd REPO
+git clone https://github.com/d-rohatgi/duet.git
+cd duet
 python3 -m unittest discover -s tests
 ```
 
