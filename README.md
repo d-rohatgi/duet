@@ -2,7 +2,7 @@
 
 Keep one playlist in sync between a Spotify account and an Apple Music account.
 
-Two people, one on each service, edit their own copy of the playlist in the app they already use. Every night, Duet copies additions, removals, and renames to the other side. It runs on a Mac.
+Two people, one on each service, edit their own copy of the playlist in the app they already use. Every night, Duet copies additions, removals, and renames to the other side. It runs on a Mac. You can also [sync from your phone](#sync-from-your-phone-optional) at any time with a Shortcut or Siri.
 
 > **Status: experimental.** The sync logic has an automated test suite, but Duet has not yet been run end to end against real Spotify and Apple Music accounts. Start with a playlist of throwaway songs (see [step 6](#6-first-run)). Bug reports and fixes are welcome.
 
@@ -16,13 +16,13 @@ Two people, one on each service, edit their own copy of the playlist in the app 
 | Someone renames the playlist | Copies the new name to the other playlist |
 | Both rename it differently | Uses the Apple Music name (configurable) |
 | A song isn't on the other service | Leaves it on its original side only, syncs everything else, and notifies you once |
-| A service is down or returns something unexpected | Changes nothing, retries, and notifies you if it keeps failing |
+| A service is down or returns something unexpected | Changes nothing, retries for about 20 minutes, and notifies you if it still fails |
 
 Duet only touches the two playlists it creates. It never edits any other playlist or your libraries.
 
 ## What you need
 
-- **A Mac** signed in to the Apple Music account, with Python 3.9 or newer. The `python3` that comes with Xcode Command Line Tools or Homebrew works. Apple's web API can't remove songs from a playlist, so Duet makes removals and renames through the Music app. The Mac doesn't need to be awake at midnight; Duet catches up when it wakes.
+- **A Mac** signed in to the Apple Music account, with Python 3.9 or newer. The `python3` that comes with Xcode Command Line Tools or Homebrew works. Apple's web API can't remove songs from a playlist, so Duet makes removals and renames through the Music app. The Mac doesn't need to be awake at midnight; Duet catches up when it wakes. A Mac that stays on, like a Mac mini, works best.
 - **An [Apple Developer Program](https://developer.apple.com/programs/) membership** (US$99/year) for the Apple Music listener. Apple requires one for any Apple Music API access.
 - **Spotify Premium** on the account that creates the Spotify developer app. Spotify [requires it for development-mode apps](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide). Usually this is the Spotify listener's own account.
 - **About 30 minutes,** with both people available for the one-time logins.
@@ -78,7 +78,7 @@ python3 -m duet configure \
   --timezone America/New_York
 ```
 
-`--name` is the shared playlist's starting name. `--timezone` is an [IANA time zone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones); it decides when a new sync day begins.
+`--name` is the shared playlist's starting name. `--timezone` is an [IANA time zone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones); it decides when a new sync day begins. Use the Mac's own time zone.
 
 Next, connect both accounts and create the playlists. Each `connect` command opens a browser window on the Mac:
 
@@ -116,25 +116,89 @@ python3 -m duet status
 python3 -m duet install
 ```
 
-This installs a macOS LaunchAgent. It syncs at midnight in your configured time zone, and checks every 15 minutes while the Mac is awake, so a missed night catches up after wake or login. After a successful sync, the day's remaining checks do nothing.
+This installs two macOS LaunchAgents:
 
-The first background run may ask for Automation permission again. The morning after installing, check `~/Library/Application Support/Duet/error.log`.
+- **The nightly sync** runs at midnight on the Mac's clock. If the Mac was asleep at midnight, it runs when the Mac wakes. If the Mac was off, it runs at the next login. Nothing else is scheduled; once the day's sync has succeeded, Duet doesn't run again until the next night.
+- **The on-demand sync** never runs by itself. It only runs when you use the [phone button](#sync-from-your-phone-optional) or `python3 -m duet trigger`.
 
-To stop the schedule and keep everything else:
+If the nightly sync hits a temporary problem, such as iCloud lagging or a network drop, it retries for about 20 minutes and then quits. If it still fails, you get a [notification](#notifications), and the next attempt is the following night or a phone-button sync.
+
+Install with the Python you plan to keep; the jobs remember its exact path. The first background run may ask for Automation permission again. The morning after installing, check `~/Library/Application Support/Duet/error.log`.
+
+To remove both jobs and keep everything else:
 
 ```bash
 python3 -m duet uninstall
 ```
 
+## Sync from your phone (optional)
+
+Tap a Shortcut, or say "Hey Siri, sync playlist," to sync right away instead of waiting for midnight. Your phone reaches the Mac through [Tailscale](https://tailscale.com), a free private network between your own devices, so nothing on the Mac is exposed to the internet. The phone replies with what changed, for example:
+
+```
+Synced: 42 songs.
+Added to Apple Music: Espresso
+Removed from Spotify: Old Song
+```
+
+```
+iPhone Shortcut ──SSH over Tailscale──▶ Mac: duet trigger ──▶ on-demand sync job ──▶ reply
+```
+
+The phone doesn't run the sync over SSH directly. An SSH session usually can't get macOS permission to control the Music app, because macOS has no way to show it the permission prompt. Instead, `duet trigger` starts the on-demand LaunchAgent, which runs inside your logged-in Mac session, and waits up to four minutes for its result. Each phone's key is limited to that one command: it can't open a shell, run anything else, or forward connections.
+
+**Requirements:**
+
+- The phone button is installed by [step 7](#7-turn-on-the-nightly-sync).
+- The Mac must stay logged in. A locked screen is fine, but background jobs and the Music app can't run at the login window. After a restart, including one after a power outage, FileVault waits at the unlock screen until someone logs in.
+
+### Set it up for your phone
+
+1. **Install Tailscale** on the Mac and on your iPhone, and sign in to the same Tailscale account on both. Note the Mac's Tailscale name, shown in the Tailscale app, for example `mac-mini`.
+2. **Turn on Remote Login** on the Mac: **System Settings → General → Sharing → Remote Login**. Under **Allow access for**, choose only your user.
+3. **Create the Shortcut** on your iPhone:
+   1. In the Shortcuts app, create a new shortcut and add a **Run Script Over SSH** action.
+   2. Set **Host** to the Mac's Tailscale name, **Port** to `22`, and **User** to your Mac username. Run `whoami` in Terminal if you're unsure of the username.
+   3. Set **Authentication** to **SSH Key**. The action generates a key. Tap it, choose **Share Public Key**, and send it to the Mac, for example with AirDrop or Notes.
+   4. Set **Script** to `sync`. The exact text doesn't matter, because the key can only run the sync.
+   5. Add a **Show Result** action after it, so you see the reply.
+   6. Name the shortcut **Sync Playlist**. Siri uses this name.
+4. **Authorize the key on the Mac.** Paste the public key between the quotes:
+
+   ```bash
+   mkdir -p ~/.ssh && chmod 700 ~/.ssh
+   python3 -m duet ssh-key-line "ssh-ed25519 AAAA…your-key… iPhone" >> ~/.ssh/authorized_keys
+   chmod 600 ~/.ssh/authorized_keys
+   ```
+
+   Run this from the Duet folder with the same Python you used for `install`. The line it adds starts with `restrict,command="…"`, which is what limits the key to syncing.
+5. **Approve the Music permission once, at the Mac.** Run `python3 -m duet trigger` in Terminal. The first time, macOS asks whether Python may control Music. Click **Allow**. This prompt appears on the Mac's screen, so nobody can approve it from a phone.
+6. **Test it** from your phone.
+
+### Add the other person's phone
+
+1. In the [Tailscale admin console](https://login.tailscale.com/admin/machines), open the Mac's **⋯** menu, choose **Share**, and invite them. They accept with their own Tailscale account and install Tailscale on their iPhone. They only get access to this Mac, not your whole network.
+2. They create the same Shortcut, using the Mac's Tailscale name and **your** Mac username.
+3. Add their public key on the Mac with `ssh-key-line`, as in step 4 above.
+
+Tailscale must be connected on the phone when they tap the button. Turn on Tailscale's **VPN On Demand** setting to connect automatically.
+
+### What to expect
+
+- **Right after adding a song on an iPhone,** the Mac's copy of the playlist may not have it from iCloud yet. Duet won't sync while the two disagree, so the reply may ask you to try again in a minute. This is intentional.
+- **If a sync is already running,** the button waits up to two minutes for it to finish, then asks you to try again.
+- **Remote Login also accepts your Mac password** from other devices on your networks. The phone keys can only run the sync; your password still works for normal logins.
+- `python3 -m duet status` shows the last phone-button result under `last_button_sync`.
+
 ## Notifications
 
-Scheduled runs post a Mac notification when:
+The nightly sync posts a Mac notification when:
 
-- syncing has failed for over an hour, or nothing has synced for two days (at most once a day, with the error);
+- it still fails after retrying for about 20 minutes (at most once a day, with the error);
 - syncing recovers after one of those alerts;
 - a newly added song couldn't be found on the other service.
 
-Short outages stay quiet, such as the first few minutes after the Mac wakes without a network connection. macOS shows these notifications as coming from **Script Editor**. If none appear, allow notifications for Script Editor in **System Settings → Notifications**. `python3 -m duet status` also shows the most recent error and any songs that aren't synced.
+Syncs started from Terminal or the phone button never post notifications; they show their result right away instead. macOS shows these notifications as coming from **Script Editor**. If none appear, allow notifications for Script Editor in **System Settings → Notifications**. `python3 -m duet status` also shows the most recent error and any songs that aren't synced.
 
 ## How syncing works
 
@@ -164,6 +228,7 @@ Duet stores everything outside this folder, in `~/Library/Application Support/Du
 | `state.json` | The last successful sync and how songs are matched across services |
 | `pending.json` | A sync plan that hasn't finished yet |
 | `alert.json` | The current failure streak, cleared after a successful sync |
+| `trigger.json` | The result of the last phone-button sync |
 | `sync.log`, `error.log` | Output from scheduled runs; tokens are never logged |
 
 - **Where your data goes:** Duet talks only to Spotify's and Apple's APIs and the Music app on your Mac. There is no server and no telemetry.
@@ -173,16 +238,20 @@ Duet stores everything outside this folder, in `~/Library/Application Support/Du
 **To remove Duet completely:**
 
 1. Run `python3 -m duet uninstall`.
-2. Delete `~/Library/Application Support/Duet/`.
-3. Delete the two playlists, if you don't want them.
-4. Remove the app's access at [spotify.com/account/apps](https://www.spotify.com/account/apps/).
-5. Revoke the key in your Apple developer account.
+2. If you set up the phone button, delete the `restrict,command=…` lines from `~/.ssh/authorized_keys`, and turn off Remote Login if nothing else uses it.
+3. Delete `~/Library/Application Support/Duet/`.
+4. Delete the two playlists, if you don't want them.
+5. Remove the app's access at [spotify.com/account/apps](https://www.spotify.com/account/apps/).
+6. Revoke the key in your Apple developer account.
 
 ## Troubleshooting
 
 - **"Waiting for Apple cloud and Mac Music to converge":** iCloud hasn't caught up yet. The plan is saved; wait a few minutes and run `python3 -m duet sync` again. The schedule retries on its own.
 - **"Playlist changed outside the pending sync":** someone edited a playlist while a sync was unfinished. Look at `pending.json` and both playlists before doing anything. Don't delete state files to clear an error, because Duet would lose track of which songs were deleted.
 - **An authorization error:** rerun the matching `connect-*` command.
+- **Phone says "Couldn't start a sync":** the Mac isn't logged in, or `install` hasn't been run.
+- **Phone says "Still syncing":** the sync took longer than four minutes, usually because iCloud is slow. It keeps running on the Mac; check `status` later.
+- **Phone button connects but nothing happens after a Python upgrade:** the jobs and key lines point at the old Python. Rerun `install`, regenerate the key lines with `ssh-key-line`, and approve the Music permission again.
 
 ## Why a Mac
 
@@ -207,8 +276,9 @@ python3 -m duet demo
 | `duet/bridge.js` | Music app scripting, limited to the paired playlist |
 | `duet/auth.py` | Spotify and Apple Music browser logins and Apple token signing |
 | `duet/alerts.py` | Mac notifications |
+| `duet/jobs.py` | Nightly and on-demand LaunchAgents, retries, and the phone button |
 | `duet/__main__.py` | Command-line commands and the LaunchAgent |
-| `tests/` | Merge, recovery, adapter, and notification tests |
+| `tests/` | Merge, recovery, adapter, notification, and job tests |
 
 ## License
 

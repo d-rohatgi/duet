@@ -1,11 +1,8 @@
-"""Mac notifications for the scheduled job: persistent failures and skipped songs."""
-from datetime import datetime, timedelta, timezone
+"""Mac notifications for the nightly job: failures and skipped songs."""
+from datetime import datetime, timezone
 import subprocess
 from zoneinfo import ZoneInfo
 
-ALERT_AFTER = timedelta(hours=1)       # a brief outage right after waking stays quiet
-NEW_EPISODE = timedelta(minutes=45)    # a longer gap between failures means the Mac slept
-STALE = timedelta(days=2)              # alert regardless once nothing has synced this long
 SERVICE = {"spotify": "Spotify", "apple": "Apple Music"}
 
 
@@ -19,19 +16,16 @@ def notify(message, title="Duet"):
         pass  # A missed notification must never affect syncing.
 
 
-def failed(store, config, message, scheduled, now=None):
+def failed(store, message, notify_user, now=None):
+    """Record a failed sync. The nightly job calls this only after its retries."""
     now = now or datetime.now(timezone.utc)
     alert = store.read("alert", {})
-    last = alert.get("last_failure")
-    if not last or now - datetime.fromisoformat(last) > NEW_EPISODE:
-        alert["failing_since"] = now.isoformat()
+    alert.setdefault("failing_since", now.isoformat())
     alert.update(last_failure=now.isoformat(), last_error=message)
-    success = store.read("state", {}).get("last_success")
-    stale = success and now - datetime.fromisoformat(success) > STALE
-    persistent = now - datetime.fromisoformat(alert["failing_since"]) >= ALERT_AFTER
-    today = now.astimezone(ZoneInfo(config["timezone"])).date().isoformat()
-    if scheduled and (persistent or stale) and alert.get("notified_on") != today:
-        notify("Playlists haven't synced. " + message)
+    zone = store.read("config", {}).get("timezone")
+    today = now.astimezone(ZoneInfo(zone) if zone else None).date().isoformat()
+    if notify_user and alert.get("notified_on") != today:
+        notify("Playlists didn't sync. " + message)
         alert["notified_on"] = today
     store.write("alert", alert)
 

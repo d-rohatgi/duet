@@ -289,53 +289,34 @@ class AlertTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.store = Store(self.temp.name)
-        self.config = {"timezone": "UTC"}
-        self.start = datetime(2026, 9, 28, 0, 0, tzinfo=timezone.utc)
-        self.store.write("state", {"last_success": (self.start - timedelta(hours=1)).isoformat()})
+        self.store.write("config", {"timezone": "UTC"})
+        self.start = datetime(2026, 9, 28, 0, 5, tzinfo=timezone.utc)
         patcher = patch("duet.alerts.notify")
         self.notify = patcher.start()
         self.addCleanup(patcher.stop)
 
-    def fail_at(self, minutes, scheduled=True):
-        alerts.failed(self.store, self.config, "Boom", scheduled, self.start + timedelta(minutes=minutes))
+    def fail_at(self, hours, notify_user=True):
+        alerts.failed(self.store, "Boom", notify_user, self.start + timedelta(hours=hours))
 
-    def test_brief_outage_is_quiet(self):
-        for minutes in (0, 15, 30):
-            self.fail_at(minutes)
-        self.notify.assert_not_called()
-
-    def test_hour_of_failures_alerts_once_per_day(self):
-        for minutes in range(0, 180, 15):
-            self.fail_at(minutes)
+    def test_nightly_failure_notifies_at_most_once_per_day(self):
+        self.fail_at(0)
+        self.fail_at(9)  # e.g. a second attempt at login the same day
         self.assertEqual(self.notify.call_count, 1)
         self.assertIn("Boom", self.notify.call_args[0][0])
-        for minutes in range(24 * 60, 24 * 60 + 90, 15):
-            self.fail_at(minutes)
+        self.fail_at(24)
         self.assertEqual(self.notify.call_count, 2)
 
-    def test_sleep_gap_restarts_the_clock(self):
-        self.fail_at(0)
-        self.fail_at(8 * 60)  # Mac slept overnight; this is a new failure episode
-        self.notify.assert_not_called()
-
-    def test_manual_failures_never_notify(self):
-        for minutes in range(0, 180, 15):
-            self.fail_at(minutes, scheduled=False)
+    def test_manual_and_button_failures_never_notify(self):
+        self.fail_at(0, notify_user=False)
         self.notify.assert_not_called()
         self.assertEqual(self.store.read("alert")["last_error"], "Boom")
 
-    def test_long_gap_without_success_alerts(self):
-        self.store.write("state", {"last_success": (self.start - timedelta(days=3)).isoformat()})
-        self.fail_at(0)
-        self.notify.assert_called_once()
-
     def test_recovery_notifies_only_after_an_alert(self):
-        self.fail_at(0)
+        self.fail_at(0, notify_user=False)
         alerts.succeeded(self.store, {}, {}, scheduled=True)
         self.notify.assert_not_called()
         self.assertIsNone(self.store.read("alert"))
-        for minutes in range(0, 90, 15):
-            self.fail_at(minutes)
+        self.fail_at(0)
         alerts.succeeded(self.store, {}, {}, scheduled=True)
         self.assertEqual(self.notify.call_args[0][0], "Playlists are syncing again.")
 
@@ -346,7 +327,6 @@ class AlertTests(unittest.TestCase):
         alerts.succeeded(self.store, {"spotify": [song]}, {"spotify": [song]}, scheduled=True)
         self.assertEqual(self.notify.call_count, 1)
         self.assertIn("2 new songs", alerts.skipped_message({}, {"apple": [track(1), track(2)]}))
-
 
 if __name__ == "__main__":
     unittest.main()

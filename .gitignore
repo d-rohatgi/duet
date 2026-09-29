@@ -10,3 +10,4 @@ state.json
 pending.json
 *.log
 alert.json
+trigger.json

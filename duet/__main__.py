@@ -1,21 +1,14 @@
 import argparse
-from datetime import datetime
 import json
 from pathlib import Path
-import plistlib
-import subprocess
 import sys
-import time
 from zoneinfo import ZoneInfo
 
-from . import alerts
+from . import jobs
 from .auth import connect
 from .core import SyncError
-from .engine import sync
 from .providers import Apple, Spotify, music_bridge, pages
 from .storage import Store, DEFAULT_HOME
-
-LABEL = "local.duet.playlist-sync"
 
 
 def parser():
@@ -34,10 +27,16 @@ def parser():
     commands.add_parser("create", help="create a dedicated playlist on each service")
     commands.add_parser("preview", help="read-only preview of the next sync")
     run = commands.add_parser("sync", help="reconcile the playlist pair")
-    run.add_argument("--due", action="store_true", help="run only if no successful sync today, or a sync is pending")
+    mode = run.add_mutually_exclusive_group()
+    mode.add_argument("--due", action="store_true",
+                      help="nightly job: skip if already synced today, retry for ~20 minutes, notify on failure")
+    mode.add_argument("--on-demand", action="store_true", help=argparse.SUPPRESS)
     commands.add_parser("status", help="show local configuration and last sync (no tokens)")
-    commands.add_parser("install", help="schedule daily sync; catches up when awake")
-    commands.add_parser("uninstall", help="remove the scheduled job; keep playlists and state")
+    commands.add_parser("install", help="schedule the nightly sync and enable the phone button")
+    commands.add_parser("uninstall", help="remove the scheduled jobs; keep playlists and state")
+    commands.add_parser("trigger", help="sync now through the background job and print a summary (phone button)")
+    key = commands.add_parser("ssh-key-line", help="print an authorized_keys line limiting a phone's key to trigger")
+    key.add_argument("public_key", help="the phone's SSH public key, in quotes")
     commands.add_parser("demo", help="run a credential-free sync example in memory")
     return p
 
@@ -79,34 +78,6 @@ def setup_playlists(config, store):
     print("Add songs in either app, then run: python3 -m duet preview")
 
 
-def schedule(store, install):
-    import os
-    path = Path.home() / "Library/LaunchAgents" / (LABEL + ".plist")
-    domain = "gui/%d" % os.getuid()
-    if not install:
-        subprocess.run(["/bin/launchctl", "bootout", domain + "/" + LABEL], capture_output=True)
-        path.unlink(missing_ok=True)
-        print("Daily sync removed. Your playlists and local state are unchanged.")
-        return
-    if not store.read("state", {}).get("last_success"):
-        raise SyncError("Complete one successful manual sync before installing the schedule.")
-    root = Path(__file__).resolve().parent.parent
-    path.parent.mkdir(parents=True, exist_ok=True)
-    job = {"Label": LABEL, "ProgramArguments": [sys.executable, "-m", "duet", "--home", str(store.root), "sync", "--due"],
-           "WorkingDirectory": str(root), "RunAtLoad": True,
-           "StartCalendarInterval": {"Hour": 0, "Minute": 0},
-           "StartInterval": 900, "ProcessType": "Background",
-           "StandardOutPath": str(store.root / "sync.log"),
-           "StandardErrorPath": str(store.root / "error.log")}
-    with path.open("wb") as f:
-        plistlib.dump(job, f)
-    subprocess.run(["/bin/launchctl", "bootout", domain + "/" + LABEL], capture_output=True)
-    result = subprocess.run(["/bin/launchctl", "bootstrap", domain, str(path)], capture_output=True, text=True)
-    if result.returncode:
-        raise SyncError("Could not load the scheduled sync: " + result.stderr.strip())
-    print("Daily sync installed. Midnight when awake; otherwise catches up after waking/logging in.")
-
-
 def demo():
     from .core import merge
     baseline = {"name": "Both of Us", "keys": ["Song A", "Song B"]}
@@ -121,6 +92,22 @@ def main():
         demo()
         return
     store = Store(args.home)
+    if args.command in ("sync", "preview"):
+        mode = "nightly" if getattr(args, "due", False) else "button" if getattr(args, "on_demand", False) else "manual"
+        result = jobs.run_sync(store, args.command, mode)
+        if mode == "manual":
+            print(json.dumps(result, indent=2))
+        return
+    if args.command == "trigger":
+        # Always print one readable line and exit 0, so a Shortcut can show it.
+        try:
+            print(jobs.trigger(store)["message"])
+        except SyncError as error:
+            print("Didn't sync: %s" % error)
+        return
+    if args.command == "ssh-key-line":
+        print(jobs.ssh_key_line(store, args.public_key))
+        return
     with store.lock():
         config = store.read("config", {})
         if args.command == "configure":
@@ -142,11 +129,13 @@ def main():
                               "spotify_playlist": config.get("spotify_playlist"), "apple_playlist": config.get("apple_playlist"),
                               "last_success": state.get("last_success"),
                               "last_error": store.read("alert", {}).get("last_error"),
+                              "last_button_sync": (store.read("trigger") or {}).get("message"),
                               "not_synced": {side: ["%s — %s" % (t["title"], t["artist"]) for t in tracks]
                                              for side, tracks in state.get("skipped", {}).items()},
                               "pending": bool(store.read("pending")), "state_folder": str(store.root)}, indent=2))
         elif args.command == "uninstall":
-            schedule(store, False)
+            jobs.uninstall()
+            print("Nightly sync and phone button removed. Your playlists and local state are unchanged.")
         elif not config:
             raise SyncError("Run configure first. See README.md for the one-time developer app setup.")
         elif args.command.startswith("connect-"):
@@ -155,31 +144,14 @@ def main():
         elif args.command == "create":
             setup_playlists(config, store)
         elif args.command == "install":
-            schedule(store, True)
-        else:
-            if not all(config.get(k) for k in ("spotify_playlist", "apple_playlist", "apple_local_id", "storefront")):
-                raise SyncError("Finish creating the playlist pair: python3 -m duet create")
-            if args.command == "sync" and args.due and not store.read("pending"):
-                last = store.read("state", {}).get("last_success")
-                zone = ZoneInfo(config["timezone"])
-                if last and datetime.fromisoformat(last).astimezone(zone).date() == datetime.now(zone).date():
-                    return
-            providers = {"spotify": Spotify(config, store), "apple": Apple(config, store)}
-            skipped_before = store.read("state", {}).get("skipped", {})
-            try:
-                output = sync(config, store, providers, preview=args.command == "preview")
-            except Exception as error:
-                if args.command == "sync":
-                    alerts.failed(store, config, str(error), scheduled=args.due)
-                raise
-            if args.command == "sync":
-                alerts.succeeded(store, skipped_before, store.read("state", {}).get("skipped", {}), args.due)
-            print(json.dumps(output, indent=2))
+            jobs.install(store)
+            print("Nightly sync installed: midnight, or when the Mac next wakes or logs in.")
+            print("Phone button ready: python3 -m duet trigger")
 
 
 if __name__ == "__main__":
     try:
         main()
-    except (SyncError, ValueError, KeyError, OSError, subprocess.TimeoutExpired) as error:
+    except jobs.EXPECTED as error:
         print("Duet: " + str(error), file=sys.stderr)
         sys.exit(1)

@@ -82,6 +82,23 @@ def describe(plan):
     return result
 
 
+def summarize(result):
+    """A short human-readable report for logs and the phone button."""
+    lines = []
+    for side, label in (("apple", "Apple Music"), ("spotify", "Spotify")):
+        if result[side]["add"]:
+            lines.append("Added to %s: %s" % (label, ", ".join(result[side]["add"])))
+        if result[side]["remove"]:
+            lines.append("Removed from %s: %s" % (label, ", ".join(result[side]["remove"])))
+    if result["apple"]["rename"] or result["spotify"]["rename"]:
+        lines.append('Renamed to "%s"' % result["name"])
+    head = ("Synced" if lines else "Already in sync") + ": %d songs." % result["songs"]
+    skipped = len(result["apple"]["not_synced"]) + len(result["spotify"]["not_synced"])
+    if skipped:
+        lines.append("%d song%s only on one service (run duet status)" % (skipped, "" if skipped == 1 else "s"))
+    return "\n".join([head] + lines)
+
+
 def sync(config, store, providers, preview=False):
     pending = store.read("pending")
     state = store.read("state", {})

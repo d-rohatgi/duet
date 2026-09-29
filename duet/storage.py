@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 
 from .core import SyncError
 
@@ -44,12 +45,17 @@ class Store:
         (self.root / (name + ".json")).unlink(missing_ok=True)
 
     @contextlib.contextmanager
-    def lock(self):
+    def lock(self, wait=0):
         with (self.root / "sync.lock").open("w") as handle:
-            try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise SyncError("Another Duet command is already running.")
+            deadline = time.monotonic() + wait
+            while True:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise SyncError("Another sync is already running. Try again in a minute.")
+                    time.sleep(1)
             try:
                 yield
             finally:
