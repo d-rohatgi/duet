@@ -90,13 +90,26 @@ python3 -m duet create
 
 - **`connect-spotify`:** the Spotify listener signs in with their Spotify account. They can sign out of the browser afterward, because Duet keeps its own authorization.
 - **`connect-apple`:** sign in with the same Apple Music account the Music app uses.
-- **`create`:** makes a new, empty playlist on each service. Both are tagged with a marker in the description, so leave the description as it is.
+- **`create`:** makes a new, empty playlist on each service. Duet tags them with a marker in the description, so leave the descriptions as they are.
   - If the Apple playlist hasn't appeared in the Music app yet, let iCloud catch up and run `create` again. It picks up where it left off.
   - When macOS asks whether Terminal may control Music, allow it.
 
+#### Already have a playlist on Spotify?
+
+Duet can use an existing Spotify playlist instead of creating a new one. In Spotify, open the playlist and choose **Share → Copy link to playlist**, then run:
+
+```bash
+python3 -m duet create --spotify-playlist "https://open.spotify.com/playlist/…"
+```
+
+- **Ownership:** the playlist must belong to the Spotify account you connected. Duet refuses playlists owned by someone else, because only the owner can rename them.
+- **What Duet changes:** it keeps the playlist's name, description, cover, and followers, and creates a matching Apple Music playlist with the same name. The `--name` you gave `configure` is replaced by the playlist's name.
+- **The first sync:** it copies the existing songs to Apple Music. It only adds songs and never removes or renames anything on the Spotify side.
+- **Switching later:** if you already ran plain `create`, you can still switch to an existing playlist before the first sync. Afterward, delete the empty playlist Duet made.
+
 ### 6. First run
 
-Add a few throwaway songs to each copy of the playlist, then run:
+Add a few throwaway songs to each copy of the playlist, then run the commands below. If you started from an existing Spotify playlist, skip the throwaway songs; its songs are the first sync.
 
 ```bash
 python3 -m duet preview
@@ -104,7 +117,13 @@ python3 -m duet sync
 python3 -m duet status
 ```
 
-`preview` is read-only and shows what would change. After `sync`, check that:
+`preview` is read-only and shows what would change. With an existing playlist, read it carefully:
+
+- **Things that stop the sync:** duplicate songs, local files, and podcast episodes, which older playlists often contain. Remove them in Spotify and run `preview` again.
+- **Songs that aren't on Apple Music** are listed under `not_synced`. They stay in the Spotify playlist only.
+- **A large first sync may take a run or two to finish.** iCloud and the Music app need time to catch up. Duet saves its progress and continues on the next run without adding anything twice.
+
+After `sync`, check that:
 
 - songs added on each side now appear on the other;
 - when you remove a synced song on one side and sync again, it disappears from the other playlist but stays in both libraries;
@@ -277,8 +296,9 @@ python3 -m duet demo
 | `duet/auth.py` | Spotify and Apple Music browser logins and Apple token signing |
 | `duet/alerts.py` | Mac notifications |
 | `duet/jobs.py` | Nightly and on-demand LaunchAgents, retries, and the phone button |
-| `duet/__main__.py` | Command-line commands and the LaunchAgent |
-| `tests/` | Merge, recovery, adapter, notification, and job tests |
+| `duet/setup.py` | Creating the playlist pair, or adopting an existing Spotify playlist |
+| `duet/__main__.py` | Command-line commands |
+| `tests/` | Merge, recovery, adapter, setup, notification, and job tests |
 
 ## License
 

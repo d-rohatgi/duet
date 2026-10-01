@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from . import jobs
 from .auth import connect
 from .core import SyncError
-from .providers import Apple, Spotify, music_bridge, pages
+from .setup import setup_playlists
 from .storage import Store, DEFAULT_HOME
 
 
@@ -24,7 +24,10 @@ def parser():
     configure.add_argument("--timezone", default="America/New_York")
     commands.add_parser("connect-spotify", help="one-time browser login for the Spotify account")
     commands.add_parser("connect-apple", help="one-time browser login for the Apple Music account")
-    commands.add_parser("create", help="create a dedicated playlist on each service")
+    create = commands.add_parser("create", help="create the playlist pair (or adopt an existing Spotify playlist)")
+    create.add_argument("--spotify-playlist", metavar="LINK",
+                        help="use this existing Spotify playlist (share link) instead of creating one; "
+                             "it must belong to the connected Spotify account")
     commands.add_parser("preview", help="read-only preview of the next sync")
     run = commands.add_parser("sync", help="reconcile the playlist pair")
     mode = run.add_mutually_exclusive_group()
@@ -39,43 +42,6 @@ def parser():
     key.add_argument("public_key", help="the phone's SSH public key, in quotes")
     commands.add_parser("demo", help="run a credential-free sync example in memory")
     return p
-
-
-def setup_playlists(config, store):
-    spotify, apple = Spotify(config, store), Apple(config, store)
-    name = config["name"]
-    # Store each created playlist ID immediately. A rerun resumes setup.
-    # When creation timed out, look for its unique setup marker before retrying.
-    marker = "Duet pair: " + config["pair_id"]
-    if not config.get("storefront"):
-        config["storefront"] = apple.api("me/storefront")["data"][0]["id"]
-        store.write("config", config)
-    if not config.get("spotify_playlist"):
-        existing = pages("me/playlists?limit=50", spotify.api, "items")
-        matches = [p for p in existing if p.get("description") == marker]
-        if len(matches) > 1:
-            raise SyncError("Multiple Spotify playlists have this pair marker; review setup.")
-        playlist = matches[0] if matches else spotify.api("me/playlists", "POST", {
-            "name": name, "public": False, "description": marker})
-        config["spotify_playlist"] = playlist["id"]
-        store.write("config", config)
-    if not config.get("apple_playlist"):
-        existing = pages("me/library/playlists?limit=100", apple.api)
-        matches = [p for p in existing if p.get("attributes", {}).get("description", {}).get("standard") == marker]
-        if len(matches) > 1:
-            raise SyncError("Multiple Apple playlists have this pair marker; review setup.")
-        playlist = matches[0] if matches else apple.api("me/library/playlists", "POST", {
-            "attributes": {"name": name, "description": marker}})["data"][0]
-        config["apple_playlist"] = playlist["id"]
-        store.write("config", config)
-    if not config.get("apple_local_id"):
-        local = music_bridge({"action": "snapshot", "name": name, "marker": marker})
-        config["apple_local_id"] = local["id"]
-        store.write("config", config)
-    # Verify that the local and remote copies really agree before linking.
-    Apple(config, store).preflight(Apple(config, store).snapshot())
-    print("Playlist pair ready: " + name)
-    print("Add songs in either app, then run: python3 -m duet preview")
 
 
 def demo():
@@ -142,7 +108,7 @@ def main():
             connect(args.command.removeprefix("connect-"), config, store)
             print("Connection saved locally.")
         elif args.command == "create":
-            setup_playlists(config, store)
+            setup_playlists(config, store, args.spotify_playlist)
         elif args.command == "install":
             jobs.install(store)
             print("Nightly sync installed: midnight, or when the Mac next wakes or logs in.")
