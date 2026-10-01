@@ -1,3 +1,4 @@
+import gzip
 import json
 import os
 from pathlib import Path
@@ -8,7 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin, urlparse, quote
 from urllib.request import Request, urlopen
 
-from .core import SyncError, choose_match, fingerprint, metadata_match
+from .core import SyncError, choose_match, fingerprint, metadata_match, same_songs
 
 
 class HTTPFailure(SyncError):
@@ -31,6 +32,10 @@ def request_json(url, method="GET", body=None, headers=None, form=None):
         try:
             with urlopen(Request(url, data=data, headers=headers, method=method), timeout=30) as response:
                 raw = response.read()
+                # Apple sometimes gzips responses (e.g. playlist creation) unasked.
+                # JSON never starts with the gzip signature, so checking it is safe.
+                if response.headers.get("Content-Encoding") == "gzip" or raw[:2] == b"\x1f\x8b":
+                    raw = gzip.decompress(raw)
                 return json.loads(raw) if raw else {}
         except HTTPError as error:
             if method == "GET" and attempt < 2 and error.code in (429, 502, 503):
@@ -276,24 +281,27 @@ class Apple:
         desired = {t["id"] for t in target}
         existing = {t["id"] for t in current["tracks"]}
         removals = existing - desired
+        songs = {t["id"]: t for t in list(current["tracks"]) + list(target)}
         if removals or current["name"] != name:
             music_bridge({"action": "edit", "id": self.config["apple_local_id"],
                           "marker": "Duet pair: " + self.config["pair_id"],
                           "expected": local, "remove_ids": [mapping[x] for x in removals],
                           "rename": name if current["name"] != name else None})
-            self.await_state(name, existing - removals)
+            self.await_state(name, [songs[x] for x in existing - removals])
         for batch in chunks([t for t in target if t["id"] not in existing]):
             self.api("me/library/playlists/%s/tracks" % self.playlist, "POST", {
                 "data": [{"id": t["id"], "type": "songs"} for t in batch]})
             existing.update(t["id"] for t in batch)
-            self.await_state(name, existing - removals)
+            self.await_state(name, [songs[x] for x in existing - removals])
 
-    def await_state(self, name, ids):
+    def await_state(self, name, expected):
         # Cloud propagation is asynchronous. Bounded polling leaves a durable
-        # pending plan if convergence takes longer than this run.
+        # pending plan if convergence takes longer than this run. Apple may
+        # re-identify an added song (another edition, or a library copy), so
+        # songs are compared as recordings, not only by ID.
         for attempt in range(8):
             current = self.snapshot()
-            if current["name"] == name and {t["id"] for t in current["tracks"]} == ids:
+            if current["name"] == name and same_songs(current["tracks"], expected):
                 try:
                     self.preflight(current)
                     return

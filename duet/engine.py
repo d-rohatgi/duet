@@ -3,15 +3,17 @@ from datetime import datetime, timezone
 import uuid
 
 from .core import (NoMatch, SyncError, assert_recoverable, canonicalize,
-                   choose_match, delta, fingerprint, merge)
+                   choose_match, delta, fingerprint, merge, relink)
 
 
 def now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def link_tracks(snapshots, providers, existing):
+def link_tracks(snapshots, providers, existing, expected=()):
     links = deepcopy(existing)
+    for side in ("spotify", "apple"):
+        relink(snapshots[side]["tracks"], side, links, expected)
     for side in ("spotify", "apple"):
         other = "apple" if side == "spotify" else "spotify"
         for track in snapshots[side]["tracks"]:
@@ -47,11 +49,27 @@ def ignored(plan, side):
     return {t["id"] for t in plan.get("skipped", {}).get(side, [])}
 
 
+def observe(plan, side, raw):
+    """One side's songs in terms of the plan, and the tracks the plan must leave alone.
+
+    Re-identified songs are followed first. Songs that arrived after planning are
+    left out of the comparison and kept in the playlist; the next sync adds them
+    to the other side.
+    """
+    links = plan["links"]
+    expected = set(plan["target"]["keys"]) | set(plan["before"][side]["keys"])
+    relink(raw["tracks"], side, links, expected)
+    keys = {link[side]["id"]: key for key, link in links.items() if side in link}
+    leave = ignored(plan, side) | {t["id"] for t in raw["tracks"] if keys.get(t["id"]) not in expected}
+    return canonicalize(raw, side, links, leave), leave
+
+
 def plan_sync(config, store, providers):
     # Read both services fully, twice, before deriving any deletion.
     snapshots = {p: providers[p].snapshot() for p in providers}
     state = store.read("state", {})
-    links, skipped = link_tracks(snapshots, providers, state.get("links", {}))
+    baseline = (state.get("baseline") or {}).get("keys", [])
+    links, skipped = link_tracks(snapshots, providers, state.get("links", {}), baseline)
     ignore = {p: {t["id"] for t in skipped[p]} for p in providers}
     current = {p: canonicalize(snapshots[p], p, links, ignore[p]) for p in providers}
     target = merge(state.get("baseline"), current, config["name"], config.get("rename_priority", "apple"))
@@ -118,22 +136,23 @@ def sync(config, store, providers, preview=False):
     # Validate both endpoints before the first mutation, including recovery.
     for side in providers:
         raw = providers[side].snapshot()
-        current = canonicalize(raw, side, links, ignored(plan, side))
+        current, _ = observe(plan, side, raw)
         assert_recoverable(plan["before"][side], current, target)
         providers[side].preflight(raw)
     for side in ("apple", "spotify"):
         raw = providers[side].snapshot()
-        current = canonicalize(raw, side, links, ignored(plan, side))
+        current, leave = observe(plan, side, raw)
         assert_recoverable(plan["before"][side], current, target)
         changes = delta(current, target)
         if changes["add"] or changes["remove"] or changes["rename"]:
-            # Skipped songs are part of the desired playlist, so apply keeps them.
-            keep = [t for t in raw["tracks"] if t["id"] in ignored(plan, side)]
+            # Skipped songs and songs added mid-sync are part of the desired
+            # playlist, so apply keeps them.
+            keep = [t for t in raw["tracks"] if t["id"] in leave]
             providers[side].apply([links[k][side] for k in target["keys"]] + keep, target["name"], raw)
     # Baseline advances only after both independent services confirm the result.
     for side in providers:
         raw = providers[side].snapshot()
-        actual = canonicalize(raw, side, links, ignored(plan, side))
+        actual, _ = observe(plan, side, raw)
         if actual["name"] != target["name"] or set(actual["keys"]) != set(target["keys"]):
             raise SyncError("%s has not converged. Pending sync saved; retry shortly." % side)
         providers[side].preflight(raw)

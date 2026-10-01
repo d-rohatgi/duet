@@ -227,7 +227,9 @@ Syncs started from Terminal or the phone button never post notifications; they s
 - **Song order isn't synced.** Each app keeps its own order, and new songs are added at the end.
 - **Matching is strict.** Duet matches songs by ISRC, the standard recording code, when it has one. Otherwise it requires the same title, artist, duration (within 2.5 seconds), and explicit rating. It never substitutes a live, remix, or other edition.
 - **Unmatched songs are skipped, not blocking.** If a song has no single clear match on the other service, it stays in its original playlist only and is never copied or deleted. Duet retries it every night, so it syncs automatically if the other service adds it later.
-- **Nothing is committed until both services confirm.** Duet saves its plan before the first write, and only records a sync as done once both services show the result. If a run is interrupted, the next run resumes the plan without adding songs twice. If someone edits the playlist while a plan is pending, Duet stops and asks for review instead of overwriting the edit.
+- **Nothing is committed until both services confirm.** Duet saves its plan before the first write, and only records a sync as done once both services show the result. If a run is interrupted, the next run resumes the plan without adding songs twice.
+- **Songs added during a sync are kept.** If someone adds a song while a sync is running or unfinished, Duet leaves it in place and copies it on the next sync. Removing a song while a sync is unfinished still stops Duet for review, so it never puts back a song someone just deleted.
+- **Apple sometimes swaps a song after it's added.** It may replace the song with another edition of the same recording, or with a copy already in your library, under a new ID. Duet treats it as the same song if exactly one song vanished from that playlist and matches it by ISRC, or by title, artist, and length.
 
 ## Limitations
 

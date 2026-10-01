@@ -83,12 +83,12 @@ def connect(provider, config, store):
         def log_message(self, *args):
             pass  # callback URLs and credentials must not appear in logs
 
-        def respond(self, status, body, kind="text/html; charset=utf-8"):
+        def respond(self, status, body, kind="text/html; charset=utf-8", referrer="no-referrer"):
             self.send_response(status)
             self.send_header("Content-Type", kind)
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Frame-Options", "DENY")
-            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Referrer-Policy", referrer)
             self.end_headers()
             self.wfile.write(body.encode())
 
@@ -123,10 +123,15 @@ button.onclick=async()=>{try{button.disabled=true;const token=await MusicKit.get
 const response=await fetch('/apple-token',{method:'POST',headers:{'Content-Type':'application/json','X-Duet-State':CSRF_STATE},body:JSON.stringify({token})});
 if(!response.ok)throw new Error('Could not save connection');
 document.getElementById('status').textContent='Connected. Return to Duet; you can close this window.';
-}catch(e){document.getElementById('status').textContent=e.message;button.disabled=false;}};
+}catch(e){document.getElementById('status').textContent=e.message+(/unauthorized/i.test(e.message)?
+' Make sure this Apple Account has an active Apple Music subscription.':'');button.disabled=false;}};
 }catch(e){document.getElementById('status').textContent=e.message;}});
 </script><script src="https://js-cdn.music.apple.com/musickit/v3/musickit.js"></script></html>'''
-                return self.respond(200, html.replace("APPLE_TOKEN", json.dumps(apple_token)).replace("CSRF_STATE", json.dumps(state)))
+                # MusicKit's sign-in rejects requests that don't name the page's
+                # origin ("Unauthorized" after Allow), so this page must not use
+                # no-referrer. Its URL holds nothing private; only the origin is sent.
+                return self.respond(200, html.replace("APPLE_TOKEN", json.dumps(apple_token))
+                                    .replace("CSRF_STATE", json.dumps(state)), referrer="origin")
             self.respond(404, "Not found")
 
         def do_POST(self):

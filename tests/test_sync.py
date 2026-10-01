@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from duet import alerts
 from duet.core import (NoMatch, SyncError, assert_recoverable, canonicalize, choose_match,
-                       merge, metadata_match)
+                       merge, metadata_match, relink, same_recording, same_songs)
 from duet.engine import sync
 from duet.providers import pages, apple_track, spotify_track
 from duet.storage import Store
@@ -52,6 +52,27 @@ class FakeProvider:
         if self.fail_after_write:
             self.fail_after_write = False
             raise SyncError("Response lost after successful write")
+
+
+class ReidentifyingApple(FakeProvider):
+    """Like Apple: after adding songs, it may swap them for another edition of the
+    same recording (new ID, same ISRC) or for a copy already in the library (new
+    ID, no ISRC, no explicit rating, slightly different length)."""
+
+    def __init__(self, *args, swaps=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.swaps = swaps or {}
+
+    def apply(self, target, name, before):
+        try:
+            super().apply(target, name, before)
+        finally:
+            for t in self.value["tracks"]:
+                t.update(self.swaps.get(t["id"], {}))
+
+
+EDITION = {"id": "1001"}  # same ISRC
+LIBRARY_COPY = {"id": "i.library", "isrc": None, "explicit": True, "duration_ms": 181500}
 
 
 class MergeTests(unittest.TestCase):
@@ -128,6 +149,36 @@ class MatchingTests(unittest.TestCase):
             with self.assertRaises(SyncError):
                 spotify_track(item)
 
+    def test_same_recording_prefers_isrc_then_loose_metadata(self):
+        self.assertTrue(same_recording(track(1), track(1, id="1001")))
+        self.assertFalse(same_recording(track(1), track(1, isrc="OTHER")))  # ISRCs disagree
+        self.assertTrue(same_recording(track(1), track(1, **LIBRARY_COPY)))  # no ISRC, rating differs
+        self.assertFalse(same_recording(track(1), track(1, isrc=None, title="Song 1 (Live)")))
+        self.assertFalse(same_recording(track(1), track(1, isrc=None, duration_ms=190000)))
+
+    def test_relink_follows_a_song_whose_old_id_vanished(self):
+        links = {"a": {"apple": track(1)}, "b": {"apple": track(2)}}
+        relink([track(1), track(2, id="2002")], "apple", links, ["a", "b"])
+        self.assertEqual(links["b"]["apple"]["id"], "2002")
+
+    def test_relink_leaves_genuine_second_editions_alone(self):
+        links = {"b": {"apple": track(2)}}
+        relink([track(2), track(2, id="2002")], "apple", links, ["b"])  # old ID still present
+        self.assertEqual(links["b"]["apple"]["id"], "2")
+
+    def test_relink_ignores_songs_not_expected_and_ambiguous_matches(self):
+        links = {"b": {"apple": track(2)}}
+        relink([track(2, id="2002")], "apple", links, [])  # e.g. a song deleted long ago
+        self.assertEqual(links["b"]["apple"]["id"], "2")
+        twins = {"b": {"apple": track(2)}, "c": {"apple": track(2, id="2b")}}
+        relink([track(2, id="2002")], "apple", twins, ["b", "c"])
+        self.assertEqual([twins[k]["apple"]["id"] for k in "bc"], ["2", "2b"])
+
+    def test_same_songs_allows_re_identified_ids_but_not_extras(self):
+        self.assertTrue(same_songs([track(1, id="1001"), track(2)], [track(1), track(2)]))
+        self.assertFalse(same_songs([track(1), track(2), track(3)], [track(1), track(2)]))
+        self.assertFalse(same_songs([track(1)], [track(1), track(2)]))
+
     def test_pagination_incomplete_is_not_empty(self):
         with self.assertRaises(SyncError):
             pages("first", lambda _: {})
@@ -185,14 +236,50 @@ class EngineTests(unittest.TestCase):
         self.assertIsNone(self.store.read("pending"))
         self.assertEqual(self.providers["apple"].writes, 1)
 
-    def test_recovery_rejects_new_user_addition(self):
-        self.providers["apple"].fail_after_write = True
+    def test_song_added_during_pending_sync_is_kept_and_synced_next_run(self):
+        apple = self.providers["apple"]
+        apple.fail_after_write = True
         with self.assertRaises(SyncError):
             self.run_sync()
-        self.providers["apple"].value["tracks"].append(track(3))
-        with self.assertRaisesRegex(SyncError, "Unlinked"):
+        apple.value["tracks"].append(track(3))  # added while the plan was pending
+        self.run_sync()  # finishes the saved plan and leaves the new song alone
+        self.assertIn("3", self.ids("apple"))
+        self.assertNotIn("s3", self.ids("spotify"))
+        self.assertIsNone(self.store.read("pending"))
+        self.run_sync()  # the next sync copies it across
+        self.assertIn("s3", self.ids("spotify"))
+
+    def test_songs_apple_re_identifies_are_followed(self):
+        spotify = FakeProvider("spotify", [1, 2, 3])
+        apple = ReidentifyingApple("apple", [], swaps={"1": EDITION, "3": dict(LIBRARY_COPY, id="i.3")})
+        self.providers = {"spotify": spotify, "apple": apple}
+        self.run_sync()
+        links = self.store.read("state")["links"]
+        self.assertEqual(sorted(l["apple"]["id"] for l in links.values()), ["1001", "2", "i.3"])
+        writes = spotify.writes + apple.writes
+        self.run_sync()
+        self.assertEqual(spotify.writes + apple.writes, writes)
+        # Deleting a re-identified song still deletes it on the other side.
+        apple.value["tracks"] = [t for t in apple.value["tracks"] if t["id"] != "i.3"]
+        self.run_sync()
+        self.assertEqual(sorted(self.ids("spotify")), ["s1", "s2"])
+
+    def test_first_sync_of_her_playlist_recovers_like_it_happened_for_real(self):
+        # The real first sync: songs were added to Apple, the confirmation timed
+        # out, Apple re-identified some of them, and she added a song meanwhile.
+        spotify = FakeProvider("spotify", [1, 2, 3])
+        apple = ReidentifyingApple("apple", [], swaps={"1": EDITION, "3": dict(LIBRARY_COPY, id="i.3")})
+        apple.fail_after_write = True
+        self.providers = {"spotify": spotify, "apple": apple}
+        with self.assertRaises(SyncError):
             self.run_sync()
-        self.assertEqual(self.providers["spotify"].writes, 0)
+        spotify.value["tracks"].append(track(4, "spotify"))
+        self.run_sync()
+        self.assertEqual(apple.writes, 1)  # nothing added twice
+        self.assertEqual(sorted(self.ids("apple")), ["1001", "2", "i.3"])
+        self.assertIn("s4", self.ids("spotify"))
+        self.run_sync()
+        self.assertEqual(sorted(self.ids("apple")), ["1001", "2", "4", "i.3"])
 
     def test_read_failure_performs_no_writes(self):
         self.providers["apple"].error = "API unavailable"

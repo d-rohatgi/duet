@@ -59,6 +59,46 @@ def choose_match(source, candidates):
     raise NoMatch(("Ambiguous match: " if matches else "No safe match: ") + label)
 
 
+def same_recording(a, b):
+    """Looser than metadata_match, for one song a service re-identified.
+
+    Library copies often lack an ISRC and an explicit rating, so neither is required.
+    """
+    if a.get("isrc") and b.get("isrc"):
+        return a["isrc"] == b["isrc"]
+    if not a.get("duration_ms") or not b.get("duration_ms"):
+        return False
+    return (abs(a["duration_ms"] - b["duration_ms"]) <= 2500 and norm(a["title"]) == norm(b["title"])
+            and norm(a["artist"]) == norm(b["artist"]))
+
+
+def relink(tracks, side, links, expected):
+    """Follow songs that a service re-identified within the same playlist.
+
+    Apple can replace a newly added song with another edition of the same
+    recording, or with a copy already in the library, under a new ID. A track
+    is relinked only to an expected song whose old ID vanished from this
+    playlist, and only when exactly one such song matches.
+    """
+    present = {t["id"] for t in tracks}
+    linked = {link[side]["id"] for link in links.values() if side in link}
+    orphans = [k for k in expected if side in links.get(k, {}) and links[k][side]["id"] not in present]
+    for track in tracks:
+        if track["id"] in linked:
+            continue
+        hits = [k for k in orphans if same_recording(links[k][side], track)]
+        if len(hits) == 1:
+            links[hits[0]][side] = track
+            orphans.remove(hits[0])
+
+
+def same_songs(tracks, expected):
+    """Whether tracks are exactly the expected songs, allowing re-identified IDs."""
+    links = {i: {"x": t} for i, t in enumerate(expected)}
+    relink(tracks, "x", links, list(links))
+    return sorted(link["x"]["id"] for link in links.values()) == sorted(t["id"] for t in tracks)
+
+
 def fingerprint(snapshot):
     # This project syncs membership and name. Manual track reordering is local.
     payload = [snapshot["name"], sorted(t["id"] for t in snapshot["tracks"])]

@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 from unittest.mock import patch
 from urllib.error import URLError
 
@@ -47,6 +48,27 @@ class AdapterTests(unittest.TestCase):
                 provider.apply([], "New", before)
             api.assert_not_called()
 
+    def fake_response(self, body, encoding=None):
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = body
+        response.headers = {"Content-Encoding": encoding} if encoding else {}
+        return response
+
+    def test_gzipped_responses_are_decoded(self):
+        import gzip
+        packed = gzip.compress(b'{"data": [{"id": "p.1"}]}')
+        # Apple's playlist creation reply arrived gzipped without being asked for.
+        for encoding in ("gzip", None):
+            with patch("duet.providers.urlopen", return_value=self.fake_response(packed, encoding)):
+                self.assertEqual(request_json("https://api.music.apple.com/v1/x", "POST", {}),
+                                 {"data": [{"id": "p.1"}]})
+
+    def test_plain_and_empty_responses_are_unchanged(self):
+        for body, expected in ((b'{"ok": true}', {"ok": True}), (b"", {})):
+            with patch("duet.providers.urlopen", return_value=self.fake_response(body)):
+                self.assertEqual(request_json("https://api.spotify.com/v1/x"), expected)
+
     def test_timeout_does_not_repeat_an_ambiguous_post(self):
         with patch("duet.providers.urlopen", side_effect=URLError("lost response")) as request:
             with self.assertRaises(SyncError):
@@ -65,7 +87,7 @@ class AdapterTests(unittest.TestCase):
         provider.snapshot = lambda: {"name": "N", "tracks": []}
         with patch.object(provider, "preflight", side_effect=[SyncError("Not ready"), None]) as preflight:
             with patch("duet.providers.time.sleep"):
-                provider.await_state("N", set())
+                provider.await_state("N", [])
             self.assertEqual(preflight.call_count, 2)
 
     def fake_apple(self, track_pages):
@@ -97,6 +119,14 @@ class AdapterTests(unittest.TestCase):
         provider = self.fake_apple([HTTPFailure("unauthorized", 401)])
         with self.assertRaises(HTTPFailure):
             provider.snapshot()
+
+    def test_apple_convergence_allows_re_identified_songs(self):
+        provider = Apple({}, None)
+        provider.snapshot = lambda: {"name": "N", "tracks": [track(1, id="1001"), track(2)]}
+        provider.preflight = lambda snapshot: None
+        with patch("duet.providers.time.sleep") as sleep:
+            provider.await_state("N", [track(1), track(2)])
+        sleep.assert_not_called()
 
     def test_apple_local_cloud_mismatch_blocks_edits(self):
         provider = Apple({}, None)
