@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 from zoneinfo import ZoneInfo
 
-from . import jobs
+from . import jobs, texts
 from .auth import connect
 from .core import SyncError
 from .setup import setup_playlists
@@ -38,10 +38,45 @@ def parser():
     commands.add_parser("install", help="schedule the nightly sync and enable the phone button")
     commands.add_parser("uninstall", help="remove the scheduled jobs; keep playlists and state")
     commands.add_parser("trigger", help="sync now through the background job and print a summary (phone button)")
+    allow = commands.add_parser("permissions", help="at the Mac: let the background jobs control Music and Messages")
+    allow.add_argument("--probe", nargs="+", help=argparse.SUPPRESS)
     key = commands.add_parser("ssh-key-line", help="print an authorized_keys line limiting a phone's key to trigger")
     key.add_argument("public_key", help="the phone's SSH public key, in quotes")
+    chat = commands.add_parser("texts", help="post each sync's changes to a Messages group chat")
+    where = chat.add_mutually_exclusive_group()
+    where.add_argument("--chat", help="a group chat's name, exactly as shown in Messages")
+    where.add_argument("--to", help="post in your one-on-one chat with this phone number or email")
+    chat.add_argument("--apple-name", help='what to call the Apple Music listener, e.g. "big dawg"')
+    chat.add_argument("--spotify-name", help='what to call the Spotify listener, e.g. "lil bug"')
+    chat.add_argument("--no-removals", action="store_true", help="announce additions and renames only")
+    chat.add_argument("--test", action="store_true", help="send a test message to the chat")
+    chat.add_argument("--off", action="store_true", help="stop posting to Messages")
     commands.add_parser("demo", help="run a credential-free sync example in memory")
     return p
+
+
+def configure_texts(args, config, store):
+    if args.off:
+        config.pop("texts", None)
+        store.write("config", config)
+        print("Messages updates turned off.")
+        return
+    destination = args.chat or args.to
+    if destination or args.apple_name or args.spotify_name:
+        if not (destination and args.apple_name and args.spotify_name):
+            raise SyncError("Give --chat or --to, plus --apple-name and --spotify-name.")
+        config["texts"] = {"chat" if args.chat else "to": destination, "removals": not args.no_removals,
+                           "names": {"apple": args.apple_name, "spotify": args.spotify_name}}
+        store.write("config", config)
+        print("Each sync will post its changes to Messages.")
+    if not config.get("texts"):
+        raise SyncError('Set up Messages first: python3 -m duet texts --to "…" --apple-name "…" --spotify-name "…"')
+    if args.test:
+        texts.send(config["texts"], '🎶 Duet is connected. Changes to "%s" will show up here.'
+                   % config.get("name", "your playlist"))
+        print("Test message sent.")
+    elif not destination:
+        print(json.dumps(config["texts"], indent=2, ensure_ascii=False))
 
 
 def demo():
@@ -70,6 +105,14 @@ def main():
             print(jobs.trigger(store)["message"])
         except SyncError as error:
             print("Didn't sync: %s" % error)
+        return
+    if args.command == "permissions":
+        if args.probe:
+            jobs.probe(store, args.probe)
+            return
+        print("If macOS asks whether Python may control Music or Messages, click Allow. Nothing is sent.")
+        for app, outcome in jobs.request_permissions(store).items():
+            print("%s: %s" % (app, outcome))
         return
     if args.command == "ssh-key-line":
         print(jobs.ssh_key_line(store, args.public_key))
@@ -109,6 +152,8 @@ def main():
             print("Connection saved locally.")
         elif args.command == "create":
             setup_playlists(config, store, args.spotify_playlist)
+        elif args.command == "texts":
+            configure_texts(args, config, store)
         elif args.command == "install":
             jobs.install(store)
             print("Nightly sync installed: midnight, or when the Mac next wakes or logs in.")

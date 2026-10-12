@@ -180,9 +180,13 @@ def music_bridge(payload):
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(payload, f)
-        process = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript",
-                                  str(Path(__file__).with_name("bridge.js")), path],
-                                 capture_output=True, text=True, timeout=60)
+        try:
+            process = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript",
+                                      str(Path(__file__).with_name("bridge.js")), path],
+                                     capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            raise SyncError("Music didn't respond. If macOS is waiting for permission, "
+                            "run python3 -m duet permissions at the Mac.") from None
         if process.returncode:
             raise SyncError("Music automation failed: " + process.stderr.strip())
         return json.loads(process.stdout)

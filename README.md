@@ -142,7 +142,15 @@ This installs two macOS LaunchAgents:
 
 If the nightly sync hits a temporary problem, such as iCloud lagging or a network drop, it retries for about 20 minutes and then quits. If it still fails, you get a [notification](#notifications), and the next attempt is the following night or a phone-button sync.
 
-Install with the Python you plan to keep; the jobs remember its exact path. The first background run may ask for Automation permission again. The morning after installing, check `~/Library/Application Support/Duet/error.log`.
+Install with the Python you plan to keep; the jobs remember its exact path.
+
+Then, sitting at the Mac, give the background jobs their permissions:
+
+```bash
+python3 -m duet permissions
+```
+
+The background jobs run as Python, and macOS keeps Python's permission to control Music, and Messages if you use [Messages updates](#messages-updates-optional), separate from Terminal's. Without this step, the prompts appear at midnight with nobody there to answer them, and the sync times out. The command starts a one-off job with the same Python, which reads from each app once, so the prompts appear now. Click **Allow** on each. It sends nothing, and it prints whether each app is allowed. Run it again after changing Python or turning on Messages updates.
 
 To remove both jobs and keep everything else:
 
@@ -191,7 +199,7 @@ The phone doesn't run the sync over SSH directly. An SSH session usually can't g
    ```
 
    Run this from the Duet folder with the same Python you used for `install`. The line it adds starts with `restrict,command="…"`, which is what limits the key to syncing.
-5. **Approve the Music permission once, at the Mac.** Run `python3 -m duet trigger` in Terminal. The first time, macOS asks whether Python may control Music. Click **Allow**. This prompt appears on the Mac's screen, so nobody can approve it from a phone.
+5. **Make sure the background jobs have their permissions.** If you haven't yet, run `python3 -m duet permissions` at the Mac and click **Allow**. The prompts appear on the Mac's screen, so nobody can approve them from a phone.
 6. **Test it** from your phone.
 
 ### Add the other person's phone
@@ -208,6 +216,42 @@ Tailscale must be connected on the phone when they tap the button. Turn on Tails
 - **If a sync is already running,** the button waits up to two minutes for it to finish, then asks you to try again.
 - **Remote Login also accepts your Mac password** from other devices on your networks. The phone keys can only run the sync; your password still works for normal logins.
 - `python3 -m duet status` shows the last phone-button result under `last_button_sync`.
+
+## Messages updates (optional)
+
+Duet can post each sync's changes to iMessage, credited to whoever made them:
+
+```
+🎶 lil bug added Opalite and Glamorama
+🗑️ big dawg removed Cough Syrup
+✏️ lil bug renamed the playlist to "Road trip"
+```
+
+Messages on the Mac sends from the Apple Account it's signed in to, which is usually the Apple Music listener's own. There are two ways to set it up.
+
+**In your existing chat with the other person (simplest).** Duet's posts appear in your normal one-on-one conversation, sent from you. The other person gets an alert for every update, including their own changes. You see the updates in the thread, but your phone won't alert you, since they're your own messages.
+
+```bash
+python3 -m duet texts --to "+15555550123" --apple-name "big dawg" --spotify-name "lil bug" --test
+```
+
+Use the phone number or email the other person uses for iMessage.
+
+**In a dedicated group, where you both get alerts.** Give Duet its own free Apple Account, sign **Messages** on the Mac into it, and create a group there with both of you. Music and Sync Library keep using your own account. iMessage can't make a group of only two people, so Duet's account is the third member, and both of you get alerts because the posts come from it. This replaces your own texts in Messages on that Mac, so it suits a Mac you don't text from.
+
+```bash
+python3 -m duet texts --chat "Big dawg & lil bug 🎶" --apple-name "big dawg" --spotify-name "lil bug" --test
+```
+
+The chat name must match the group's name in Messages exactly.
+
+**Either way:**
+
+- **`--test` posts a hello message.** When macOS asks whether Terminal may control Messages, click **OK**.
+- **Then run `python3 -m duet permissions` at the Mac** and click **Allow**. The nightly and phone-button syncs run as Python, which needs its own permission to control Messages. Without it, their posts time out waiting for a prompt nobody sees.
+- **When it posts:** after every successful sync, whether nightly, from the phone button, or run by hand. Syncs with no changes stay quiet.
+- **Options:** add `--no-removals` to announce only additions and renames. Turn updates off with `python3 -m duet texts --off`.
+- **If posting fails,** the sync still completes, and the problem is logged in `sync.log`.
 
 ## Notifications
 
@@ -250,6 +294,7 @@ Duet stores everything outside this folder, in `~/Library/Application Support/Du
 | `pending.json` | A sync plan that hasn't finished yet |
 | `alert.json` | The current failure streak, cleared after a successful sync |
 | `trigger.json` | The result of the last phone-button sync |
+| `permissions.json` | The result of the last `permissions` check |
 | `sync.log`, `error.log` | Output from scheduled runs; tokens are never logged |
 
 - **Where your data goes:** Duet talks only to Spotify's and Apple's APIs and the Music app on your Mac. There is no server and no telemetry.
@@ -270,6 +315,7 @@ Duet stores everything outside this folder, in `~/Library/Application Support/Du
 - **"Waiting for Apple cloud and Mac Music to converge":** iCloud hasn't caught up yet. The plan is saved; wait a few minutes and run `python3 -m duet sync` again. The schedule retries on its own.
 - **"Playlist changed outside the pending sync":** someone edited a playlist while a sync was unfinished. Look at `pending.json` and both playlists before doing anything. Don't delete state files to clear an error, because Duet would lose track of which songs were deleted.
 - **An authorization error:** rerun the matching `connect-*` command.
+- **`sync.log` says Music or Messages "didn't respond":** macOS was waiting for permission at a time nobody was at the Mac. Run `python3 -m duet permissions` there and click **Allow**.
 - **Phone says "Couldn't start a sync":** the Mac isn't logged in, or `install` hasn't been run.
 - **Phone says "Still syncing":** the sync took longer than four minutes, usually because iCloud is slow. It keeps running on the Mac; check `status` later.
 - **Phone button connects but nothing happens after a Python upgrade:** the jobs and key lines point at the old Python. Rerun `install`, regenerate the key lines with `ssh-key-line`, and approve the Music permission again.
@@ -297,10 +343,11 @@ python3 -m duet demo
 | `duet/bridge.js` | Music app scripting, limited to the paired playlist |
 | `duet/auth.py` | Spotify and Apple Music browser logins and Apple token signing |
 | `duet/alerts.py` | Mac notifications |
+| `duet/texts.py` | Posting each sync's changes to Messages |
 | `duet/jobs.py` | Nightly and on-demand LaunchAgents, retries, and the phone button |
 | `duet/setup.py` | Creating the playlist pair, or adopting an existing Spotify playlist |
 | `duet/__main__.py` | Command-line commands |
-| `tests/` | Merge, recovery, adapter, setup, notification, and job tests |
+| `tests/` | Merge, recovery, adapter, setup, notification, Messages, and job tests |
 
 ## License
 

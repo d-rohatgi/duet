@@ -11,3 +11,4 @@ pending.json
 *.log
 alert.json
 trigger.json
+permissions.json

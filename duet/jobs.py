@@ -9,19 +9,23 @@ import sys
 import time
 from zoneinfo import ZoneInfo
 
-from . import alerts
+from . import alerts, texts
 from .core import SyncError
 from .engine import summarize, sync
 from .providers import Apple, Spotify
 
 NIGHTLY = "local.duet.playlist-sync"
 ON_DEMAND = "local.duet.sync-now"
+PERMISSIONS = "local.duet.permissions"
 AGENTS = Path.home() / "Library/LaunchAgents"
 ROOT = Path(__file__).resolve().parent.parent
 EXPECTED = (SyncError, ValueError, KeyError, OSError, subprocess.TimeoutExpired)
 RETRY_DELAYS = (60, 180, 360, 600)  # the nightly run keeps trying for about 20 minutes
 LOCK_WAIT = 120                     # a button press waits this long for a running sync
 TRIGGER_TIMEOUT = 240
+PERMISSION_TIMEOUT = 180            # time to notice and answer the macOS prompts
+# A harmless read from each app, enough to make macOS ask for permission.
+PROBES = {"Music": "count sources", "Messages": "count accounts"}
 
 
 def log(message):
@@ -71,6 +75,11 @@ def run_sync(store, command, mode):
             if mode == "button":
                 report(store, False, "Didn't sync: %s" % error)
             raise
+    if command == "sync" and result is not None:
+        try:
+            texts.announce(store, result)
+        except EXPECTED as error:
+            log("Synced, but couldn't post to Messages: %s" % error)
     if result is not None and mode != "manual":
         log(summarize(result))
         if mode == "button":
@@ -101,6 +110,56 @@ def trigger(store, label=ON_DEMAND, timeout=TRIGGER_TIMEOUT, poll=1):
         if outcome.get("finished_at", 0) >= requested:
             return outcome
     raise SyncError("Still syncing. Check again in a few minutes.")
+
+
+def probe(store, apps):
+    """Inside the one-off permissions job: touch each app once."""
+    results = {}
+    for app in apps:
+        if app not in PROBES:
+            raise SyncError("Unknown app: " + app)
+        try:
+            done = subprocess.run(["/usr/bin/osascript", "-e", 'tell application "%s" to %s' % (app, PROBES[app])],
+                                  capture_output=True, text=True, timeout=PERMISSION_TIMEOUT - 30)
+            results[app] = "allowed" if done.returncode == 0 else "not allowed: " + done.stderr.strip()
+        except subprocess.TimeoutExpired:
+            results[app] = "no answer to the macOS prompt"
+    store.write("permissions", {"finished_at": time.time(), "results": results})
+
+
+def request_permissions(store, timeout=PERMISSION_TIMEOUT, poll=1):
+    """Ask macOS now for the access the background jobs need. Sends nothing.
+
+    The nightly and button syncs run as Python, whose Music and Messages
+    permissions are separate from Terminal's. Otherwise their prompts appear
+    unattended at midnight and time out. A one-off LaunchAgent runs the same
+    Python in this session and touches each app once, so you can click Allow.
+    """
+    apps = ["Music"] + (["Messages"] if store.read("config", {}).get("texts") else [])
+    path = store.root / (PERMISSIONS + ".plist")
+    with path.open("wb") as f:
+        plistlib.dump({"Label": PERMISSIONS, "ProgramArguments": command_line(store, "permissions", "--probe", *apps),
+                       "WorkingDirectory": str(ROOT), "ProcessType": "Interactive",
+                       "StandardOutPath": str(store.root / "sync.log"),
+                       "StandardErrorPath": str(store.root / "error.log")}, f)
+    target = domain() + "/" + PERMISSIONS
+    subprocess.run(["/bin/launchctl", "bootout", target], capture_output=True)
+    requested = time.time()
+    try:
+        loaded = subprocess.run(["/bin/launchctl", "bootstrap", domain(), str(path)], capture_output=True, text=True)
+        if loaded.returncode:
+            raise SyncError("Couldn't start the permission check: " + loaded.stderr.strip())
+        subprocess.run(["/bin/launchctl", "kickstart", target], capture_output=True)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            time.sleep(poll)
+            outcome = store.read("permissions") or {}
+            if outcome.get("finished_at", 0) >= requested:
+                return outcome["results"]
+        raise SyncError("No answer yet. Look for a macOS permission prompt, click Allow, and run this again.")
+    finally:
+        subprocess.run(["/bin/launchctl", "bootout", target], capture_output=True)
+        path.unlink(missing_ok=True)
 
 
 def ssh_key_line(store, public_key):

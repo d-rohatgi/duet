@@ -198,6 +198,55 @@ class InstallTests(JobTestCase):
         self.assertEqual(list(self.agents.iterdir()), [])
 
 
+class PermissionsTests(JobTestCase):
+    def test_probe_records_each_apps_answer(self):
+        answers = {"Music": subprocess.CompletedProcess([], 0, "3", ""),
+                   "Messages": subprocess.CompletedProcess([], 1, "", "Not authorized to send Apple events (-1743)")}
+        def run(command, **kwargs):
+            return answers[command[-1].split('"')[1]]
+        with patch("duet.jobs.subprocess.run", side_effect=run):
+            jobs.probe(self.store, ["Music", "Messages"])
+        results = self.store.read("permissions")["results"]
+        self.assertEqual(results["Music"], "allowed")
+        self.assertIn("-1743", results["Messages"])
+
+    def test_probe_only_runs_known_harmless_reads(self):
+        with patch("duet.jobs.subprocess.run") as run:
+            with self.assertRaises(SyncError):
+                jobs.probe(self.store, ['Finder" to delete every file --'])
+        run.assert_not_called()
+
+    def request(self, texts_on):
+        if texts_on:
+            self.store.write("config", {"texts": {"to": "+15555550123"}})
+        calls = []
+        def run(command, **kwargs):
+            calls.append(command)
+            if command[1] == "bootstrap":
+                with open(command[3], "rb") as f:
+                    self.job = plistlib.load(f)
+            if command[1] == "kickstart":  # the one-off job answers
+                self.store.write("permissions", {"finished_at": jobs.time.time() + 1,
+                                                 "results": {"Music": "allowed"}})
+            return subprocess.CompletedProcess(command, 0, "", "")
+        with patch("duet.jobs.subprocess.run", side_effect=run):
+            results = jobs.request_permissions(self.store, poll=0)
+        return results, calls
+
+    def test_asks_for_messages_only_when_texts_are_on(self):
+        self.request(texts_on=False)
+        self.assertEqual(self.job["ProgramArguments"][-3:], ["permissions", "--probe", "Music"])
+        self.request(texts_on=True)
+        self.assertEqual(self.job["ProgramArguments"][-2:], ["Music", "Messages"])
+
+    def test_one_off_job_runs_the_same_python_and_is_removed(self):
+        results, calls = self.request(texts_on=True)
+        self.assertEqual(results, {"Music": "allowed"})
+        self.assertEqual(self.job["ProgramArguments"][0], jobs.sys.executable)
+        self.assertEqual(calls[-1][1], "bootout")
+        self.assertFalse((self.store.root / (jobs.PERMISSIONS + ".plist")).exists())
+
+
 class SummaryTests(unittest.TestCase):
     def result(self, **sides):
         empty = {"add": [], "remove": [], "rename": None, "not_synced": []}
